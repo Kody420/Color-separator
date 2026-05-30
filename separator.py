@@ -1,5 +1,6 @@
 import base64
 import io as _io
+import re
 from PIL import Image, ImageOps, ImageTk
 import numpy as np
 import os
@@ -20,6 +21,192 @@ except ImportError:
     _SVG_SUPPORT = False
 
 THUMB = 200  # max thumbnail dimension in pixels
+
+_SVG_NS = "http://www.w3.org/2000/svg"
+_SVG_SHAPE_TAGS = frozenset(
+    f"{{{_SVG_NS}}}{t}" for t in
+    ("path", "circle", "rect", "ellipse", "polygon", "polyline",
+     "line", "text", "tspan", "use")
+)
+_NAMED_COLORS = {
+    "black": (0, 0, 0), "white": (255, 255, 255), "red": (255, 0, 0),
+    "green": (0, 128, 0), "blue": (0, 0, 255), "yellow": (255, 255, 0),
+    "orange": (255, 165, 0), "purple": (128, 0, 128), "pink": (255, 192, 203),
+    "gray": (128, 128, 128), "grey": (128, 128, 128), "brown": (165, 42, 42),
+    "cyan": (0, 255, 255), "magenta": (255, 0, 255), "lime": (0, 255, 0),
+    "navy": (0, 0, 128), "teal": (0, 128, 128), "silver": (192, 192, 192),
+    "maroon": (128, 0, 0), "olive": (128, 128, 0), "aqua": (0, 255, 255),
+    "fuchsia": (255, 0, 255),
+}
+
+
+def _svg_style_get(style, prop):
+    if not style:
+        return None
+    m = re.search(
+        rf"(?:^|;)\s*{re.escape(prop)}\s*:\s*([^;]+)",
+        style,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    value = m.group(1).strip()
+    if value in ("inherit", ""):
+        return None
+    return value
+
+
+def _svg_style_set(style, prop, value):
+    parts = []
+    for raw in (style or "").split(";"):
+        item = raw.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            parts.append(item)
+            continue
+        key, val = item.split(":", 1)
+        if key.strip().lower() == prop.lower():
+            continue
+        parts.append(f"{key.strip()}:{val.strip()}")
+    parts.append(f"{prop}:{value}")
+    return ";".join(parts)
+
+
+def _svg_get_fill(elem):
+    style_val = _svg_style_get(elem.get("style") or "", "fill")
+    if style_val is not None:
+        return style_val
+    fill_attr = elem.get("fill")
+    if fill_attr and fill_attr != "inherit":
+        return fill_attr.strip()
+    return None
+
+
+def _svg_get_stroke(elem):
+    style_val = _svg_style_get(elem.get("style") or "", "stroke")
+    if style_val is not None:
+        return style_val
+    stroke_attr = elem.get("stroke")
+    if stroke_attr and stroke_attr != "inherit":
+        return stroke_attr.strip()
+    return None
+
+
+def _parse_svg_color(value):
+    if not value:
+        return None
+    value = value.strip()
+    if value in ("none", "transparent", "inherit", "currentColor") or value.startswith("url("):
+        return None
+
+    # light-dark(light_val, dark_val) — take the light-mode value
+    if value.startswith("light-dark(") and value.endswith(")"):
+        inner = value[len("light-dark("):-1]
+        depth = 0
+        for idx, ch in enumerate(inner):
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                return _parse_svg_color(inner[:idx].strip())
+        return _parse_svg_color(inner.strip())
+
+    # var(--name, fallback) — use fallback
+    if value.startswith("var(") and value.endswith(")"):
+        inner = value[4:-1]
+        idx = inner.find(",")
+        if idx >= 0:
+            return _parse_svg_color(inner[idx + 1:].strip())
+        return None
+
+    if value.startswith("#"):
+        hx = value[1:]
+        if len(hx) == 3:
+            hx = hx[0] * 2 + hx[1] * 2 + hx[2] * 2
+        if len(hx) == 6:
+            try:
+                return (int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16))
+            except ValueError:
+                return None
+
+    m = re.match(
+        r"rgb\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)",
+        value,
+    )
+    if m:
+        return (int(float(m.group(1))), int(float(m.group(2))), int(float(m.group(3))))
+
+    return _NAMED_COLORS.get(value.lower())
+
+
+def _apply_svg_output_transforms(svg_str, color_mode="", bg_color=None):
+    """Apply output color/background transforms directly to serialized SVG text."""
+    if not svg_str or _etree is None:
+        return svg_str
+    if color_mode not in ("black", "white") and bg_color is None:
+        return svg_str
+
+    target = None
+    if color_mode == "black":
+        target = "#000000"
+    elif color_mode == "white":
+        target = "#ffffff"
+
+    try:
+        root = _etree.fromstring(svg_str.encode("utf-8"))
+    except Exception:
+        # If parsing fails for any reason, keep original SVG so save still succeeds.
+        return svg_str
+
+    def _walk(elem, inh_fill=None, inh_stroke=None, hidden=False):
+        own_fill = _svg_get_fill(elem)
+        own_stroke = _svg_get_stroke(elem)
+        resolved_fill = own_fill if own_fill is not None else inh_fill
+        resolved_stroke = own_stroke if own_stroke is not None else inh_stroke
+
+        style = elem.get("style") or ""
+        display_attr = (elem.get("display") or "").strip().lower()
+        display_style = (_svg_style_get(style, "display") or "").strip().lower()
+        hidden_here = hidden or display_attr == "none" or display_style == "none"
+
+        if target is not None and not hidden_here and elem.tag in _SVG_SHAPE_TAGS:
+            has_fill = resolved_fill is not None and _parse_svg_color(resolved_fill) is not None
+            has_stroke = resolved_stroke is not None and _parse_svg_color(resolved_stroke) is not None
+
+            style_changed = False
+            if has_fill:
+                elem.set("fill", target)
+                if _svg_style_get(style, "fill") is not None:
+                    style = _svg_style_set(style, "fill", target)
+                    style_changed = True
+            if has_stroke:
+                elem.set("stroke", target)
+                if _svg_style_get(style, "stroke") is not None:
+                    style = _svg_style_set(style, "stroke", target)
+                    style_changed = True
+            if style_changed:
+                elem.set("style", style)
+
+        for child in elem:
+            _walk(child, resolved_fill, resolved_stroke, hidden_here)
+
+    _walk(root)
+
+    if bg_color is not None:
+        bg_hex = "#{:02x}{:02x}{:02x}".format(*bg_color)
+        bg = _etree.Element(f"{{{_SVG_NS}}}rect")
+        bg.set("x", "0")
+        bg.set("y", "0")
+        bg.set("width", "100%")
+        bg.set("height", "100%")
+        bg.set("fill", bg_hex)
+        bg.set("data-csep-background", "1")
+        root.insert(0, bg)
+
+    output = _etree.tostring(root, encoding="unicode", xml_declaration=False)
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + output
 
 
 def remove_small_islands(labels_2d, min_size):
@@ -482,27 +669,30 @@ class App(tk.Tk):
         """Re-derive result_images from originals applying current color mode and background."""
         if not self._orig_images:
             return
-        images = []
-        for filename, img in self._orig_images:
-            out = img.copy()
+        try:
+            images = []
+            for filename, img in self._orig_images:
+                out = img.copy()
 
-            # Color mode: override all visible pixels to black or white
-            mode = self._color_mode_var.get()
-            if mode in ("black", "white"):
-                target = (0, 0, 0, 255) if mode == "black" else (255, 255, 255, 255)
-                arr = np.array(out)
-                arr[arr[:, :, 3] > 0] = target
-                out = Image.fromarray(arr, "RGBA")
+                # Color mode: override all visible pixels to black or white
+                mode = self._color_mode_var.get()
+                if mode in ("black", "white"):
+                    target = (0, 0, 0, 255) if mode == "black" else (255, 255, 255, 255)
+                    arr = np.array(out)
+                    arr[arr[:, :, 3] > 0] = target
+                    out = Image.fromarray(arr, "RGBA")
 
-            # Background: composite visible pixels over chosen solid color
-            if self._bg_color is not None:
-                bg = Image.new("RGBA", out.size, self._bg_color + (255,))
-                bg.paste(out, mask=out.split()[3])
-                out = bg
+                # Background: composite visible pixels over chosen solid color
+                if self._bg_color is not None:
+                    bg = Image.new("RGBA", out.size, self._bg_color + (255,))
+                    bg.paste(out, mask=out.split()[3])
+                    out = bg
 
-            images.append((filename, out))
-        self.result_images = images
-        self._show_output_thumbs(images)
+                images.append((filename, out))
+            self.result_images = images
+            self._show_output_thumbs(images)
+        except Exception as exc:
+            messagebox.showerror("Transform error", str(exc))
 
     def _set_color_mode(self, mode):
         """Toggle color mode; clicking the active button turns it off."""
@@ -660,7 +850,23 @@ class App(tk.Tk):
         for idx, (filename, img) in enumerate(images):
             thumb = img.copy()
             thumb.thumbnail((THUMB, THUMB), Image.LANCZOS)
-            photo = ImageTk.PhotoImage(thumb)
+
+            # Composite onto a checkered background so transparent areas and
+            # black/white transformed pixels are always clearly visible.
+            if thumb.mode == "RGBA":
+                th, tw = thumb.height, thumb.width
+                ys, xs = np.mgrid[0:th, 0:tw]
+                checker = ((xs // 10 + ys // 10) % 2 == 0)
+                arr_bg = np.empty((th, tw, 3), dtype=np.uint8)
+                arr_bg[ checker] = (220, 220, 220)
+                arr_bg[~checker] = (180, 180, 180)
+                bg_img = Image.fromarray(arr_bg, "RGB")
+                bg_img.paste(thumb.convert("RGB"), mask=thumb.split()[3])
+                disp = bg_img
+            else:
+                disp = thumb.convert("RGB") if thumb.mode != "RGB" else thumb
+
+            photo = ImageTk.PhotoImage(disp)
             self._photo_refs.append(photo)
 
             cell = tk.Frame(self.out_frame, relief="flat", padx=4, pady=4,
@@ -670,6 +876,8 @@ class App(tk.Tk):
             tk.Label(cell, image=photo, bg=theme.CARD).pack()
             tk.Label(cell, text=filename, font=("Segoe UI", 7), wraplength=THUMB,
                      bg=theme.CARD, fg=theme.TEXT_DIM).pack()
+
+        self.out_canvas.update_idletasks()
 
     # ----------------------------------------------------------------- Save
     def _save(self):
@@ -685,11 +893,19 @@ class App(tk.Tk):
         try:
             os.makedirs(output_dir, exist_ok=True)
             if fmt == "SVG":
+                if not self._orig_svg_data:
+                    raise ValueError("No SVG output data available. Run separation on an SVG input first.")
+                mode = self._color_mode_var.get()
                 for filename, svg_str in self._orig_svg_data:
+                    svg_out = _apply_svg_output_transforms(
+                        svg_str,
+                        color_mode=mode,
+                        bg_color=self._bg_color,
+                    )
                     base = os.path.splitext(filename)[0]
                     save_path = os.path.join(output_dir, base + ".svg")
                     with open(save_path, "w", encoding="utf-8") as fh:
-                        fh.write(svg_str)
+                        fh.write(svg_out)
             else:
                 for filename, img in self.result_images:
                     base = os.path.splitext(filename)[0]
