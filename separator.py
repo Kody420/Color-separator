@@ -3,7 +3,7 @@ import numpy as np
 import os
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 from scipy import ndimage
 from sklearn.cluster import KMeans
 
@@ -110,9 +110,9 @@ class App(tk.Tk):
         self.result_images = []   # list of (filename, PIL.Image)
         self._orig_images  = []   # pre-transform originals
         self._photo_refs   = []   # keep PhotoImage refs alive
-        self._mono_var   = tk.BooleanVar(value=False)
-        self._invert_var = tk.BooleanVar(value=False)
-        self.format_var  = tk.StringVar(value="PNG")
+        self._color_mode_var = tk.StringVar(value="")  # "" | "black" | "white"
+        self._bg_color       = None                     # None = transparent | (r,g,b)
+        self.format_var      = tk.StringVar(value="PNG")
         self._build_ui()
 
     # ------------------------------------------------------------------ UI
@@ -187,14 +187,22 @@ class App(tk.Tk):
         tk.Label(hdr_row, text="Output colors", font=("", 9, "bold")).pack(side="left")
         xf_frame = tk.Frame(hdr_row)
         xf_frame.pack(side="right")
-        self._mono_cb = tk.Checkbutton(xf_frame, text="Monochromatic",
-                                        variable=self._mono_var, command=self._apply_transforms,
-                                        state="disabled")
-        self._mono_cb.pack(side="left", padx=6)
-        self._invert_cb = tk.Checkbutton(xf_frame, text="Invert",
-                                          variable=self._invert_var, command=self._apply_transforms,
-                                          state="disabled")
-        self._invert_cb.pack(side="left", padx=6)
+        self._black_btn = tk.Button(xf_frame, text="Black", width=6,
+                                     command=lambda: self._set_color_mode("black"),
+                                     state="disabled")
+        self._black_btn.pack(side="left", padx=2)
+        self._white_btn = tk.Button(xf_frame, text="White", width=6,
+                                     command=lambda: self._set_color_mode("white"),
+                                     state="disabled")
+        self._white_btn.pack(side="left", padx=2)
+        ttk.Separator(xf_frame, orient="vertical").pack(side="left", fill="y", padx=8)
+        tk.Label(xf_frame, text="Background:").pack(side="left")
+        self._bg_btn = tk.Button(xf_frame, text="    ", width=3,
+                                  command=self._pick_bg_color, state="disabled")
+        self._bg_btn.pack(side="left", padx=2)
+        self._bg_transparent_btn = tk.Button(xf_frame, text="Transparent",
+                                              command=self._set_bg_transparent, state="disabled")
+        self._bg_transparent_btn.pack(side="left", padx=2)
 
         # Scrollable output area
         out_outer = tk.Frame(preview)
@@ -218,27 +226,50 @@ class App(tk.Tk):
 
     # --------------------------------------------------------- Browse helpers
     def _apply_transforms(self):
-        """Re-derive result_images from originals applying current mono/invert flags."""
+        """Re-derive result_images from originals applying current color mode and background."""
         if not self._orig_images:
             return
         images = []
         for filename, img in self._orig_images:
             out = img.copy()
-            if self._mono_var.get():
-                r, g, b, a = out.split()
-                bw = out.convert("L").point(lambda x: 255 if x >= 128 else 0)
-                out = Image.merge("RGBA", (bw, bw, bw, a))
-            if self._invert_var.get():
-                r, g, b, a = out.split()
-                out = Image.merge("RGBA", (
-                    ImageOps.invert(r),
-                    ImageOps.invert(g),
-                    ImageOps.invert(b),
-                    a,
-                ))
+
+            # Color mode: override all visible pixels to black or white
+            mode = self._color_mode_var.get()
+            if mode in ("black", "white"):
+                target = (0, 0, 0, 255) if mode == "black" else (255, 255, 255, 255)
+                arr = np.array(out)
+                arr[arr[:, :, 3] > 0] = target
+                out = Image.fromarray(arr, "RGBA")
+
+            # Background: composite visible pixels over chosen solid color
+            if self._bg_color is not None:
+                bg = Image.new("RGBA", out.size, self._bg_color + (255,))
+                bg.paste(out, mask=out.split()[3])
+                out = bg
+
             images.append((filename, out))
         self.result_images = images
         self._show_output_thumbs(images)
+
+    def _set_color_mode(self, mode):
+        """Toggle the color mode; clicking the active button turns it off."""
+        self._color_mode_var.set("" if self._color_mode_var.get() == mode else mode)
+        self._black_btn.config(relief="sunken" if self._color_mode_var.get() == "black" else "raised")
+        self._white_btn.config(relief="sunken" if self._color_mode_var.get() == "white" else "raised")
+        self._apply_transforms()
+
+    def _pick_bg_color(self):
+        initial = "#%02x%02x%02x" % self._bg_color if self._bg_color else "#ffffff"
+        result = colorchooser.askcolor(color=initial, title="Pick background color")
+        if result[1]:  # None if user cancelled
+            self._bg_color = tuple(int(c) for c in result[0])
+            self._bg_btn.config(bg=result[1], activebackground=result[1])
+            self._apply_transforms()
+
+    def _set_bg_transparent(self):
+        self._bg_color = None
+        self._bg_btn.config(bg=self.cget("bg"), activebackground=self.cget("bg"))
+        self._apply_transforms()
 
     def _browse_input(self):
         path = filedialog.askopenfilename(filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
@@ -302,13 +333,16 @@ class App(tk.Tk):
             messagebox.showerror("Error", error)
         else:
             self._orig_images = images
-            self._mono_var.set(False)
-            self._invert_var.set(False)
+            self._color_mode_var.set("")
+            self._bg_color = None
+            self._bg_btn.config(bg=self.cget("bg"), activebackground=self.cget("bg"))
+            self._black_btn.config(state="normal", relief="raised")
+            self._white_btn.config(state="normal", relief="raised")
+            self._bg_btn.config(state="normal")
+            self._bg_transparent_btn.config(state="normal")
             self.result_images = images
             self._show_output_thumbs(images)
             self.save_btn.config(state="normal")
-            self._mono_cb.config(state="normal")
-            self._invert_cb.config(state="normal")
             self.status_var.set(f"{len(images)} color(s) extracted. Press Save to write files.")
 
     def _show_output_thumbs(self, images):
@@ -345,10 +379,9 @@ class App(tk.Tk):
         ext = ext_map.get(fmt, ".png")
         try:
             os.makedirs(output_dir, exist_ok=True)
-            prefix = "inv_" if self._invert_var.get() else ""
             for filename, img in self.result_images:
                 base = os.path.splitext(filename)[0]
-                save_path = os.path.join(output_dir, prefix + base + ext)
+                save_path = os.path.join(output_dir, base + ext)
                 if fmt in ("JPEG", "BMP"):
                     # flatten transparent areas onto white for formats without alpha
                     bg = Image.new("RGB", img.size, (255, 255, 255))
