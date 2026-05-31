@@ -514,6 +514,7 @@ class App(tk.Tk):
         self.res_height_entry = None
         self._setup_style()
         self._build_ui()
+        self.after(0, self._apply_window_chrome_theme)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -655,7 +656,7 @@ class App(tk.Tk):
         xf_frame.pack(side="right")
 
         self._black_btn = tk.Button(
-            xf_frame, text="⬛ Black", width=8,
+            xf_frame, text="☐ Black", width=9,
             command=lambda: self._set_color_mode("black"), state="disabled",
             bg="#1e1e1e", fg=theme.TEXT, relief="flat",
             activebackground="#2a2a2a", activeforeground=theme.TEXT,
@@ -664,7 +665,7 @@ class App(tk.Tk):
         self._black_btn.pack(side="left", padx=2)
 
         self._white_btn = tk.Button(
-            xf_frame, text="⬜ White", width=8,
+            xf_frame, text="☐ White", width=9,
             command=lambda: self._set_color_mode("white"), state="disabled",
             bg="#f0f0f0", fg="#1a1a1a", relief="flat",
             activebackground="#dcdcdc", activeforeground="#1a1a1a",
@@ -674,12 +675,14 @@ class App(tk.Tk):
 
         ttk.Separator(xf_frame, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(xf_frame, text="Background:").pack(side="left")
+        self._bg_btn_frame = tk.Frame(xf_frame, bg=theme.TEXT, bd=0, highlightthickness=0)
+        self._bg_btn_frame.pack(side="left", padx=2)
         self._bg_btn = tk.Button(
-            xf_frame, text="  ", width=3,
+            self._bg_btn_frame, text="  ", width=3,
             command=self._pick_bg_color, state="disabled",
             bg=theme.BG, relief="flat",
-            highlightbackground=theme.BORDER, highlightthickness=1, cursor="hand2")
-        self._bg_btn.pack(side="left", padx=2)
+            highlightthickness=0, bd=0, cursor="hand2")
+        self._bg_btn.pack(side="left", padx=1, pady=1)
         self._bg_transparent_btn = ttk.Button(
             xf_frame, text="Transparent",
             command=self._set_bg_transparent, state="disabled")
@@ -708,6 +711,77 @@ class App(tk.Tk):
     # --------------------------------------------------------- Browse helpers
     def _setup_style(self):
         theme.apply(self)
+
+    def _apply_window_chrome_theme(self):
+        """Try to match Windows title bar colors with the app theme."""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19
+            DWMWA_BORDER_COLOR = 34
+            DWMWA_CAPTION_COLOR = 35
+            DWMWA_TEXT_COLOR = 36
+
+            def _hex_to_colorref(hex_color):
+                c = (hex_color or "").strip().lstrip("#")
+                if len(c) != 6:
+                    return None
+                try:
+                    r = int(c[0:2], 16)
+                    g = int(c[2:4], 16)
+                    b = int(c[4:6], 16)
+                except ValueError:
+                    return None
+                return ctypes.c_uint(r | (g << 8) | (b << 16))
+
+            self.update_idletasks()
+            hwnd = self.winfo_id()
+            try:
+                parent = ctypes.windll.user32.GetParent(hwnd)
+                if parent:
+                    hwnd = parent
+            except Exception:
+                pass
+
+            dark_mode = ctypes.c_int(1)
+            for attr in (DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD):
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    attr,
+                    ctypes.byref(dark_mode),
+                    ctypes.sizeof(dark_mode),
+                )
+
+            caption = _hex_to_colorref(theme.BG)
+            border = _hex_to_colorref(theme.BG)
+            text = _hex_to_colorref(theme.TEXT)
+            if caption is not None:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_CAPTION_COLOR,
+                    ctypes.byref(caption),
+                    ctypes.sizeof(caption),
+                )
+            if border is not None:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_BORDER_COLOR,
+                    ctypes.byref(border),
+                    ctypes.sizeof(border),
+                )
+            if text is not None:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_TEXT_COLOR,
+                    ctypes.byref(text),
+                    ctypes.sizeof(text),
+                )
+        except Exception:
+            # Keep default OS title bar behavior if attributes are unavailable.
+            return
 
     def _apply_transforms(self):
         """Re-derive result_images from originals applying current color mode and background."""
@@ -741,10 +815,20 @@ class App(tk.Tk):
     def _set_color_mode(self, mode):
         """Toggle color mode; clicking the active button turns it off."""
         self._color_mode_var.set("" if self._color_mode_var.get() == mode else mode)
-        m = self._color_mode_var.get()
-        self._black_btn.config(bg="#555555" if m == "black" else "#1e1e1e")
-        self._white_btn.config(bg="#c8c8c8" if m == "white" else "#f0f0f0")
+        self._update_color_mode_buttons()
         self._apply_transforms()
+
+    def _update_color_mode_buttons(self):
+        """Refresh black/white button visuals including checkmark state."""
+        mode = self._color_mode_var.get()
+        self._black_btn.config(
+            text=("☑ Black" if mode == "black" else "☐ Black"),
+            bg=("#555555" if mode == "black" else "#1e1e1e"),
+        )
+        self._white_btn.config(
+            text=("☑ White" if mode == "white" else "☐ White"),
+            bg=("#c8c8c8" if mode == "white" else "#f0f0f0"),
+        )
 
     def _pick_bg_color(self):
         initial = "#%02x%02x%02x" % self._bg_color if self._bg_color else "#ffffff"
@@ -952,8 +1036,9 @@ class App(tk.Tk):
             self._color_mode_var.set("")
             self._bg_color = None
             self._bg_btn.config(bg=theme.BG, activebackground=theme.BG)
-            self._black_btn.config(state="normal", bg="#1e1e1e")
-            self._white_btn.config(state="normal", bg="#f0f0f0")
+            self._black_btn.config(state="normal")
+            self._white_btn.config(state="normal")
+            self._update_color_mode_buttons()
             self._bg_btn.config(state="normal")
             self._bg_transparent_btn.config(state="normal")
             self.result_images = images
