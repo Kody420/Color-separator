@@ -26,7 +26,7 @@ This tool is mainly intended for images with **solid colors** (logos, symbols, e
 
 ### Python
 
-- Python 3.10+ recommended.
+- Python 3.13+ required.
 
 ### Python packages
 
@@ -41,21 +41,26 @@ This tool is mainly intended for images with **solid colors** (logos, symbols, e
 
 ## Install Dependencies
 
-From the project folder:
+Install [uv](https://github.com/astral-sh/uv) on Windows (if you do not have it yet):
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install pillow numpy scipy scikit-learn pymupdf lxml
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
+
+Then, from the project folder:
+
+```powershell
+uv sync
+```
+
+This command installs dependencies from `pyproject.toml` and `uv.lock` into `.venv`.
 
 ## Run the App (Python)
 
 From the project folder:
 
 ```powershell
-python separator.py
+uv run separator.py
 ```
 
 ## Build Executable with PyInstaller
