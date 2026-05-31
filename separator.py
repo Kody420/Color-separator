@@ -236,12 +236,13 @@ def remove_small_islands(labels_2d, min_size):
     return result
 
 
-def separate_colors(input_path, num_colors=3, tolerance=0.2, min_island_size=0):
+def separate_colors(input_path, num_colors=3, tolerance=0.2, min_island_size=0, source_name=None):
     """
     input_path      : raster image path (PNG, JPEG, BMP …) or a PIL Image object
     num_colors      : number of dominant colors to extract (k-means clusters)
     tolerance       : 0.0 = strict clustering, 1.0 = more smoothing (less sensitive)
     min_island_size : remove connected pixel islands smaller than this (0 = off)
+    source_name     : base filename used in output naming (without extension)
     Returns list of (filename, PIL.Image) — one entry per color cluster.
     """
 
@@ -250,6 +251,13 @@ def separate_colors(input_path, num_colors=3, tolerance=0.2, min_island_size=0):
     else:
         img = input_path if input_path.mode == "RGBA" else input_path.convert("RGBA")
     data = np.array(img)
+
+    if source_name:
+        base_name = os.path.splitext(os.path.basename(source_name))[0]
+    elif isinstance(input_path, str):
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+    else:
+        base_name = "output"
 
     rgb = data[:, :, :3]
     h, w = rgb.shape[:2]
@@ -278,6 +286,7 @@ def separate_colors(input_path, num_colors=3, tolerance=0.2, min_island_size=0):
         labels = labels_2d.reshape(-1)
 
     result_images = []
+    name_counts = {}
 
     # create one image per cluster
     for i in range(num_colors):
@@ -299,15 +308,19 @@ def separate_colors(input_path, num_colors=3, tolerance=0.2, min_island_size=0):
 
         img_out = Image.fromarray(out, "RGBA")
         hex_color = "#{:02x}{:02x}{:02x}".format(*cluster_color)
-        result_images.append((f"cluster_{i}_{hex_color}.png", img_out))
+        stem = f"{base_name}_{hex_color}"
+        name_counts[stem] = name_counts.get(stem, 0) + 1
+        suffix = "" if name_counts[stem] == 1 else f"_{name_counts[stem]}"
+        result_images.append((f"{stem}{suffix}.png", img_out))
 
     return result_images
 
 
-def separate_colors_svg(input_path, num_colors=3, tolerance=0.2):
+def separate_colors_svg(input_path, num_colors=3, tolerance=0.2, source_name=None):
     """
     SVG-native color separation: groups vector elements by fill color without
     rasterising.  Works on SVGs with solid fill colors (hex, rgb(), named).
+    source_name     : base filename used in output naming (without extension)
     Returns list of (filename, svg_str) — one entry per color cluster.
     """
     import re, copy
@@ -396,6 +409,13 @@ def separate_colors_svg(input_path, num_colors=3, tolerance=0.2):
     tree = _etree.parse(input_path)
     root = tree.getroot()
 
+    if source_name:
+        base_name = os.path.splitext(os.path.basename(source_name))[0]
+    elif isinstance(input_path, str):
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+    else:
+        base_name = "output"
+
     # Collect shape elements and their resolved fill or stroke colors
     shaped = []  # [(element, (r, g, b))]
 
@@ -439,6 +459,7 @@ def separate_colors_svg(input_path, num_colors=3, tolerance=0.2):
         elem.set(_ATTR, str(int(label)))
 
     results = []
+    name_counts = {}
     try:
         for ci in range(k):
             new_root = copy.deepcopy(root)
@@ -462,7 +483,10 @@ def separate_colors_svg(input_path, num_colors=3, tolerance=0.2):
 
             color = tuple(int(x) for x in centers[ci])
             hex_color = "#{:02x}{:02x}{:02x}".format(*color)
-            results.append((f"cluster_{ci}_{hex_color}.svg", svg_str))
+            stem = f"{base_name}_{hex_color}"
+            name_counts[stem] = name_counts.get(stem, 0) + 1
+            suffix = "" if name_counts[stem] == 1 else f"_{name_counts[stem]}"
+            results.append((f"{stem}{suffix}.svg", svg_str))
     finally:
         # Remove temp attributes from original tree
         for (elem, _) in shaped:
@@ -871,6 +895,7 @@ class App(tk.Tk):
                         input_path,
                         num_colors=num_colors,
                         tolerance=tolerance,
+                        source_name=input_path,
                     )
                     # Raster pipeline — rasterise the whole input SVG then run
                     # pixel K-means; used for preview and PNG/JPEG/BMP saves
@@ -898,6 +923,7 @@ class App(tk.Tk):
                         num_colors=num_colors,
                         tolerance=tolerance,
                         min_island_size=min_island_size,
+                        source_name=input_path,
                     )
                     self.after(0, self._on_done, images, None, svg_data)
                 else:
@@ -906,6 +932,7 @@ class App(tk.Tk):
                         num_colors=num_colors,
                         tolerance=tolerance,
                         min_island_size=min_island_size,
+                        source_name=input_path,
                     )
                     self.after(0, self._on_done, images, None, None)
             except Exception as exc:
@@ -944,6 +971,7 @@ class App(tk.Tk):
         for idx, (filename, img) in enumerate(images):
             thumb = img.copy()
             thumb.thumbnail((THUMB, THUMB), Image.LANCZOS)
+            preview_name = os.path.splitext(filename)[0]
 
             # Composite onto a checkered background so transparent areas and
             # black/white transformed pixels are always clearly visible.
@@ -968,7 +996,7 @@ class App(tk.Tk):
             cell.grid(row=idx // cols, column=idx % cols, padx=6, pady=6, sticky="n")
 
             tk.Label(cell, image=photo, bg=theme.CARD).pack()
-            tk.Label(cell, text=filename, font=("Segoe UI", 7), wraplength=THUMB,
+            tk.Label(cell, text=preview_name, font=("Segoe UI", 7), wraplength=THUMB,
                      bg=theme.CARD, fg=theme.TEXT_DIM).pack()
 
         self.out_canvas.update_idletasks()
