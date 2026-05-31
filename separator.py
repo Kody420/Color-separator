@@ -484,6 +484,10 @@ class App(tk.Tk):
         self.format_var      = tk.StringVar(value="PNG")
         self._input_is_svg   = False
         self._orig_svg_data  = None   # list of (filename, svg_str) when input is SVG
+        self.res_width_var   = tk.StringVar(value="")
+        self.res_height_var  = tk.StringVar(value="")
+        self.res_width_entry = None
+        self.res_height_entry = None
         self._setup_style()
         self._build_ui()
 
@@ -516,7 +520,7 @@ class App(tk.Tk):
                              relief="flat", bd=0, cursor="hand2",
                              font=("Segoe UI", 9), padx=6, pady=2)
 
-        _lbl(ctrl, "Input PNG:").grid(row=0, column=0, sticky="e", **pad)
+        _lbl(ctrl, "Input image:").grid(row=0, column=0, sticky="e", **pad)
         self.input_var = tk.StringVar()
         _entry(ctrl, self.input_var).grid(row=0, column=1, **pad)
         _browse(ctrl, self._browse_input).grid(row=0, column=2, **pad)
@@ -563,11 +567,27 @@ class App(tk.Tk):
                                        state="readonly", width=8)
         self.fmt_combo.grid(row=5, column=1, sticky="w", **pad)
 
+        _lbl(ctrl, "Resolution (W x H):").grid(row=6, column=0, sticky="e", **pad)
+        resf = tk.Frame(ctrl, bg=theme.PANEL)
+        resf.grid(row=6, column=1, sticky="w", **pad)
+        self.res_width_entry = _entry(resf, self.res_width_var, w=7)
+        self.res_width_entry.config(disabledbackground=theme.INPUT_BG,
+                        disabledforeground=theme.TEXT)
+        self.res_width_entry.pack(side="left")
+        tk.Label(resf, text=" x ", bg=theme.PANEL, fg=theme.TEXT,
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.res_height_entry = _entry(resf, self.res_height_var, w=7)
+        self.res_height_entry.config(disabledbackground=theme.INPUT_BG,
+                         disabledforeground=theme.TEXT)
+        self.res_height_entry.pack(side="left")
+
+        self._set_resolution_editable(False)
+
         tk.Frame(ctrl, height=1, bg=theme.BORDER).grid(
-            row=6, column=0, columnspan=3, sticky="ew", padx=4, pady=8)
+            row=7, column=0, columnspan=3, sticky="ew", padx=4, pady=8)
 
         btn_row = tk.Frame(ctrl, bg=theme.PANEL)
-        btn_row.grid(row=7, column=0, columnspan=3, pady=(0, 6))
+        btn_row.grid(row=8, column=0, columnspan=3, pady=(0, 6))
         self.run_btn = tk.Button(btn_row, text="▶  Run", command=self._run,
                                   bg=theme.ACCENT, fg="#ffffff",
                                   activebackground=theme.ACCENT_H, activeforeground="#ffffff",
@@ -584,12 +604,12 @@ class App(tk.Tk):
         self.save_btn.pack(side="left", padx=4)
 
         self.progress = ttk.Progressbar(ctrl, mode="indeterminate", length=280)
-        self.progress.grid(row=8, column=0, columnspan=3, pady=4, padx=4)
+        self.progress.grid(row=9, column=0, columnspan=3, pady=4, padx=4)
 
         self.status_var = tk.StringVar(value="Ready.")
         tk.Label(ctrl, textvariable=self.status_var, bg=theme.PANEL, fg=theme.TEXT_DIM,
                  font=("Segoe UI", 9), wraplength=280, justify="left").grid(
-            row=9, column=0, columnspan=3, pady=(0, 4))
+            row=10, column=0, columnspan=3, pady=(0, 4))
 
         # ── Right: preview ────────────────────────────────────────────────
         preview = ttk.Frame(self, padding=(4, 10, 10, 10))
@@ -715,12 +735,59 @@ class App(tk.Tk):
         self._bg_btn.config(bg=theme.BG, activebackground=theme.BG)
         self._apply_transforms()
 
+    def _set_resolution_editable(self, editable):
+        state = "normal" if editable else "disabled"
+        if self.res_width_entry is not None:
+            self.res_width_entry.config(state=state)
+        if self.res_height_entry is not None:
+            self.res_height_entry.config(state=state)
+
+    def _update_resolution_from_input(self, path):
+        try:
+            if path.lower().endswith(".svg") and _SVG_SUPPORT:
+                with open(path, "rb") as f:
+                    svg_data = f.read()
+                doc = _fitz.Document(stream=svg_data, filetype="svg")
+                try:
+                    pix = doc[0].get_pixmap()
+                    width, height = pix.width, pix.height
+                finally:
+                    doc.close()
+                self.res_width_var.set(str(int(width)))
+                self.res_height_var.set(str(int(height)))
+                self._set_resolution_editable(True)
+            else:
+                with Image.open(path) as img:
+                    width, height = img.size
+                self.res_width_var.set(str(int(width)))
+                self.res_height_var.set(str(int(height)))
+                self._set_resolution_editable(False)
+        except Exception:
+            self.res_width_var.set("")
+            self.res_height_var.set("")
+            self._set_resolution_editable(False)
+
+    def _get_resolution_values(self):
+        try:
+            width = int(self.res_width_var.get().strip())
+            height = int(self.res_height_var.get().strip())
+        except ValueError as exc:
+            raise ValueError("Resolution width and height must be whole numbers.") from exc
+
+        if width <= 0 or height <= 0:
+            raise ValueError("Resolution width and height must be greater than zero.")
+
+        return width, height
+
     def _browse_input(self):
         if _SVG_SUPPORT:
-            ftypes = [("Image files", "*.png *.svg"), ("PNG files", "*.png"),
+            ftypes = [("Image files", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff *.svg"),
+                      ("Raster files", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
+                      ("PNG files", "*.png"),
                       ("SVG files", "*.svg"), ("All files", "*.*")]
         else:
-            ftypes = [("PNG files", "*.png"), ("All files", "*.*")]
+            ftypes = [("Image files", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
+                      ("PNG files", "*.png"), ("All files", "*.*")]
         path = filedialog.askopenfilename(filetypes=ftypes)
         if path:
             self.input_var.set(path)
@@ -728,6 +795,7 @@ class App(tk.Tk):
                 self.output_var.set(os.path.join(os.path.dirname(path), "output_colors"))
             self._input_is_svg = path.lower().endswith(".svg")
             self._update_format_options()
+            self._update_resolution_from_input(path)
             self._update_input_thumb(path)
 
     def _browse_output(self):
@@ -771,11 +839,23 @@ class App(tk.Tk):
     def _run(self):
         input_path = self.input_var.get().strip()
         if not input_path:
-            messagebox.showwarning("Missing input", "Please select an input PNG file.")
+            messagebox.showwarning("Missing input", "Please select an input image file.")
             return
         if not os.path.isfile(input_path):
             messagebox.showerror("File not found", f"Cannot find:\n{input_path}")
             return
+
+        num_colors = self.num_colors_var.get()
+        tolerance = self.tolerance_var.get()
+        min_island_size = self.min_island_var.get()
+
+        svg_target_resolution = None
+        if self._input_is_svg:
+            try:
+                svg_target_resolution = self._get_resolution_values()
+            except ValueError as exc:
+                messagebox.showerror("Invalid resolution", str(exc))
+                return
 
         self.run_btn.config(state="disabled")
         self.save_btn.config(state="disabled")
@@ -789,29 +869,43 @@ class App(tk.Tk):
                     # Vector-native pipeline — used when saving as SVG
                     svg_data = separate_colors_svg(
                         input_path,
-                        num_colors=self.num_colors_var.get(),
-                        tolerance=self.tolerance_var.get(),
+                        num_colors=num_colors,
+                        tolerance=tolerance,
                     )
                     # Raster pipeline — rasterise the whole input SVG then run
                     # pixel K-means; used for preview and PNG/JPEG/BMP saves
                     with open(input_path, "rb") as _f:
                         _svg_bytes = _f.read()
                     _doc = _fitz.Document(stream=_svg_bytes, filetype="svg")
-                    _pix = _doc[0].get_pixmap()
+                    try:
+                        _page = _doc[0]
+                        _default_pix = _page.get_pixmap()
+                        default_w, default_h = _default_pix.width, _default_pix.height
+                        target_w, target_h = svg_target_resolution or (default_w, default_h)
+
+                        if (target_w, target_h) == (default_w, default_h):
+                            _pix = _default_pix
+                        else:
+                            scale_x = target_w / max(default_w, 1)
+                            scale_y = target_h / max(default_h, 1)
+                            _pix = _page.get_pixmap(matrix=_fitz.Matrix(scale_x, scale_y))
+                    finally:
+                        _doc.close()
+
                     _input_img = Image.open(_io.BytesIO(_pix.tobytes("png"))).convert("RGBA")
                     images = separate_colors(
                         _input_img,
-                        num_colors=self.num_colors_var.get(),
-                        tolerance=self.tolerance_var.get(),
-                        min_island_size=self.min_island_var.get(),
+                        num_colors=num_colors,
+                        tolerance=tolerance,
+                        min_island_size=min_island_size,
                     )
                     self.after(0, self._on_done, images, None, svg_data)
                 else:
                     images = separate_colors(
                         input_path,
-                        num_colors=self.num_colors_var.get(),
-                        tolerance=self.tolerance_var.get(),
-                        min_island_size=self.min_island_var.get(),
+                        num_colors=num_colors,
+                        tolerance=tolerance,
+                        min_island_size=min_island_size,
                     )
                     self.after(0, self._on_done, images, None, None)
             except Exception as exc:
